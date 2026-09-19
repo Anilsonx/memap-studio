@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>MeMap Studio</title>
+  <meta name="theme-color" content="#4f46e5" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React 18 & Babel Standalone -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #030712; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 select-none">
+  <div id="root" class="w-full h-full"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // Ícones SVG Inline ultra-leves
+    const Icons = {
+      Plus: () => <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>,
+      Trash: () => <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>,
+      Sparkles: () => <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>,
+      Download: () => <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>,
+      Install: () => <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 2v13M5 10l7 7 7-7M5 21h14"/></svg>,
+      Layout: () => <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18M9 21V9"/></svg>,
+      Edit: () => <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+    };
+
+    const INITIAL_NODES = [
+      { id: '1', title: 'SaaS MeMap Studio', desc: 'Central de controle e diagramação PWA', x: 200, y: 150, color: '#6366f1', tags: ['Início'] },
+      { id: '2', title: 'Empresa Cliente', desc: 'Subconta no Asaas com saldo centralizado', x: 550, y: 80, color: '#10b981', tags: ['Asaas'] },
+      { id: '3', title: 'Motorista / Cobrador', desc: 'Gera Pix individual com externalReference', x: 550, y: 240, color: '#f59e0b', tags: ['Mobile'] }
+    ];
+
+    const INITIAL_CONNS = [
+      { id: 'c1', from: '1', to: '2', fromPort: 'right', toPort: 'left', label: 'Split Automático', labelMode: 'horizontal' },
+      { id: 'c2', from: '1', to: '3', fromPort: 'bottom', toPort: 'top', label: 'Emissão Pix', labelMode: 'follow' }
+    ];
+
+    function App() {
+      const [nodes, setNodes] = useState(() => {
+        const saved = localStorage.getItem('memap_nodes_v2');
+        return saved ? JSON.parse(saved) : INITIAL_NODES;
+      });
+
+      const [connections, setConnections] = useState(() => {
+        const saved = localStorage.getItem('memap_conns_v2');
+        return saved ? JSON.parse(saved) : INITIAL_CONNS;
+      });
+
+      const [selectedNode, setSelectedNode] = useState(null);
+      const [selectedConn, setSelectedConn] = useState(null);
+      const [viewMode, setViewMode] = useState('full'); // full, simple, notag, borderless
+      const [globalLabelMode, setGlobalLabelMode] = useState('horizontal'); // follow, horizontal
+
+      // Canvas viewport
+      const [pan, setPan] = useState({ x: 20, y: 50 });
+      const [zoom, setZoom] = useState(1);
+      const containerRef = useRef(null);
+
+      // Interações
+      const [draggingNodeId, setDraggingNodeId] = useState(null);
+      const [dragStartPos, setDragStartPos] = useState({ x: 0, y: 0 });
+      const [hasDraggedSignificantly, setHasDraggedSignificantly] = useState(false);
+
+      // Conexões
+      const [tempConnection, setTempConnection] = useState(null); // { fromId, fromPort, currentX, currentY }
+
+      // PWA Prompt
+      const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+      // Auto-save
+      useEffect(() => {
+        localStorage.setItem('memap_nodes_v2', JSON.stringify(nodes));
+        localStorage.setItem('memap_conns_v2', JSON.stringify(connections));
+      }, [nodes, connections]);
+
+      // PWA Service Worker & Manifest
+      useEffect(() => {
+        window.addEventListener('beforeinstallprompt', (e) => {
+          e.preventDefault();
+          setDeferredPrompt(e);
+        });
+
+        const manifest = {
+          name: "MeMap Studio",
+          short_name: "MeMap",
+          start_url: "/",
+          display: "standalone",
+          background_color: "#030712",
+          theme_color: "#4f46e5"
+        };
+        const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+        const link = document.createElement('link');
+        link.rel = 'manifest';
+        link.href = URL.createObjectURL(blob);
+        document.head.appendChild(link);
+      }, []);
+
+      const handleInstallClick = () => {
+        if (deferredPrompt) {
+          deferredPrompt.prompt();
+          deferredPrompt.userChoice.then(() => setDeferredPrompt(null));
+        } else {
+          alert("📱 Para instalar no celular:\n\n• No Android: Abra o Chrome, toque nos 3 pontinhos e escolha 'Instalar Aplicativo'.\n• No iPhone: Abra o Safari, toque em Compartilhar e escolha 'Adicionar à Tela de Início'.");
+        }
+      };
+
+      // Conversor de coordenadas de tela para o mundo canvas
+      const getCanvasPoint = (clientX, clientY) => {
+        if (!containerRef.current) return { x: 0, y: 0 };
+        const rect = containerRef.current.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left - pan.x) / zoom,
+          y: (clientY - rect.top - pan.y) / zoom
+        };
+      };
+
+      // Cálculo de posições exatas dos nós e portas
+      const getNodeDims = (node) => {
+        return {
+          w: viewMode === 'simple' ? 170 : 210,
+          h: viewMode === 'simple' ? 65 : 105
+        };
+      };
+
+      const getPortCoord = (node, port) => {
+        const { w, h } = getNodeDims(node);
+        switch (port) {
+          case 'top': return { x: node.x + w / 2, y: node.y };
+          case 'bottom': return { x: node.x + w / 2, y: node.y + h };
+          case 'left': return { x: node.x, y: node.y + h / 2 };
+          case 'right': return { x: node.x + w, y: node.y + h / 2 };
+          default: return { x: node.x + w / 2, y: node.y + h / 2 };
+        }
+      };
+
+      // Início do arrasto do Nó
+      const handleNodePointerDown = (e, node) => {
+        e.stopPropagation();
+        const pt = getCanvasPoint(e.clientX || e.touches?.[0]?.clientX, e.clientY || e.touches?.[0]?.clientY);
+        setDraggingNodeId(node.id);
+        setDragStartPos({ x: pt.x - node.x, y: pt.y - node.y });
+        setHasDraggedSignificantly(false);
+      };
+
+      // Início da criação de conexão por uma porta cardeal
+      const handlePortPointerDown = (e, nodeId, port) => {
+        e.stopPropagation();
+        const clientX = e.clientX || e.touches?.[0]?.clientX;
+        const clientY = e.clientY || e.touches?.[0]?.clientY;
+        const pt = getCanvasPoint(clientX, clientY);
+
+        setTempConnection({
+          fromId: nodeId,
+          fromPort: port,
+          currentX: pt.x,
+          currentY: pt.y
+        });
+      };
+
+      // Movimento do Canvas ou do Nó
+      const handleCanvasPointerMove = (e) => {
+        const clientX = e.clientX || e.touches?.[0]?.clientX;
+        const clientY = e.clientY || e.touches?.[0]?.clientY;
+        if (!clientX || !clientY) return;
+
+        const pt = getCanvasPoint(clientX, clientY);
+
+        // Se estiver criando conexão
+        if (tempConnection) {
+          setTempConnection(prev => ({ ...prev, currentX: pt.x, currentY: pt.y }));
+          return;
+        }
+
+        // Se estiver arrastando um nó
+        if (draggingNodeId) {
+          setHasDraggedSignificantly(true);
+          setNodes(nodes.map(n => n.id === draggingNodeId ? {
+            ...n,
+            x: Math.round(pt.x - dragStartPos.x),
+            y: Math.round(pt.y - dragStartPos.y)
+          } : n));
+        }
+      };
+
+      // Fim do movimento e soltura da conexão
+      const handleCanvasPointerUp = (e) => {
+        if (tempConnection) {
+          const clientX = e.clientX || e.changedTouches?.[0]?.clientX;
+          const clientY = e.clientY || e.changedTouches?.[0]?.clientY;
+          
+          if (clientX && clientY) {
+            const elem = document.elementFromPoint(clientX, clientY);
+            const portEl = elem?.closest('[data-port]');
+            if (portEl) {
+              const targetNodeId = portEl.getAttribute('data-node-id');
+              const targetPort = portEl.getAttribute('data-port');
+
+              if (targetNodeId && targetNodeId !== tempConnection.fromId) {
+                const newConn = {
+                  id: 'c_' + Date.now(),
+                  from: tempConnection.fromId,
+                  to: targetNodeId,
+                  fromPort: tempConnection.fromPort,
+                  toPort: targetPort,
+                  label: 'Fluxo',
+                  labelMode: globalLabelMode
+                };
+                setConnections(prev => [...prev, newConn]);
+                setSelectedConn(newConn);
+              }
+            }
+          }
+          setTempConnection(null);
+        }
+
+        setDraggingNodeId(null);
+      };
+
+      const addNode = () => {
+        const id = Date.now().toString();
+        const pt = getCanvasPoint(window.innerWidth / 2, window.innerHeight / 2);
+        const newNode = {
+          id,
+          title: `Tópico ${nodes.length + 1}`,
+          desc: 'Toque para editar esta descrição...',
+          x: Math.round(pt.x - 80),
+          y: Math.round(pt.y - 40),
+          color: ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#06b6d4'][nodes.length % 5],
+          tags: ['Novo']
+        };
+        setNodes([...nodes, newNode]);
+        setSelectedNode(newNode);
+      };
+
+      const deleteNode = (id, e) => {
+        if (e) e.stopPropagation();
+        setNodes(nodes.filter(n => n.id !== id));
+        setConnections(connections.filter(c => c.from !== id && c.to !== id));
+        if (selectedNode?.id === id) setSelectedNode(null);
+      };
+
+      // Cálculo de Curva Bézier Paramétrica e Ponto Central Real
+      const computeBezier = (p1, p2, fromPort, toPort) => {
+        let dx = 70, dy = 70;
+        let cp1 = { ...p1 }, cp2 = { ...p2 };
+
+        if (fromPort === 'top') cp1.y -= dy;
+        else if (fromPort === 'bottom') cp1.y += dy;
+        else if (fromPort === 'left') cp1.x -= dx;
+        else cp1.x += dx;
+
+        if (toPort === 'top') cp2.y -= dy;
+        else if (toPort === 'bottom') cp2.y += dy;
+        else if (toPort === 'left') cp2.x -= dx;
+        else cp2.x += dx;
+
+        // Ponto Bézier exato no ponto t=0.5
+        const t = 0.5;
+        const mt = 1 - t;
+        const midX = mt*mt*mt*p1.x + 3*mt*mt*t*cp1.x + 3*mt*t*t*cp2.x + t*t*t*p2.x;
+        const midY = mt*mt*mt*p1.y + 3*mt*mt*t*cp1.y + 3*mt*t*t*cp2.y + t*t*t*p2.y;
+
+        // Ângulo de rotação da tangente
+        const dX = 3*mt*mt*(cp1.x - p1.x) + 6*mt*t*(cp2.x - cp1.x) + 3*t*t*(p2.x - cp2.x);
+        const dY = 3*mt*mt*(cp1.y - p1.y) + 6*mt*t*(cp2.y - cp1.y) + 3*t*t*(p2.y - cp2.y);
+        let angle = Math.atan2(dY, dX) * (180 / Math.PI);
+        if (angle > 90 || angle < -90) angle += 180;
+
+        return {
+          path: `M ${p1.x} ${p1.y} C ${cp1.x} ${cp1.y}, ${cp2.x} ${cp2.y}, ${p2.x} ${p2.y}`,
+          midX, midY, angle
+        };
+      };
+
+      return (
+        <div 
+          className="w-full h-full relative overflow-hidden flex flex-col bg-slate-950 font-sans"
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPointerUp}
+          onTouchMove={handleCanvasPointerMove}
+          onTouchEnd={handleCanvasPointerUp}
+        >
+          {/* BARRA SUPERIOR RESPONSIVA */}
+          <header className="h-14 bg-slate-900/95 border-b border-slate-800 flex items-center justify-between px-3 z-30 shrink-0 select-none shadow-md">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-lg">
+                M
+              </div>
+              <span className="font-bold text-sm text-white tracking-wide">MeMap Studio</span>
+            </div>
+
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1">
+              <button 
+                onClick={addNode} 
+                className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-medium shadow active:scale-95 transition"
+              >
+                <Icons.Plus /> <span>Nó</span>
+              </button>
+
+              <select 
+                value={viewMode} 
+                onChange={(e) => setViewMode(e.target.value)}
+                className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1.5 outline-none"
+              >
+                <option value="full">Completo</option>
+                <option value="simple">Simplificado</option>
+                <option value="notag">Sem Tags</option>
+                <option value="borderless">Sem Bordas</option>
+              </select>
+
+              <select 
+                value={globalLabelMode} 
+                onChange={(e) => {
+                  setGlobalLabelMode(e.target.value);
+                  setConnections(connections.map(c => ({ ...c, labelMode: e.target.value })));
+                }}
+                className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1.5 outline-none"
+                title="Orientação dos Rótulos"
+              >
+                <option value="horizontal">Rótulo: Horizontal</option>
+                <option value="follow">Rótulo: Curva</option>
+              </select>
+
+              <button 
+                onClick={handleInstallClick} 
+                className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-medium shadow active:scale-95 transition"
+              >
+                <Icons.Install /> <span className="hidden sm:inline">Instalar</span>
+              </button>
+            </div>
+          </header>
+
+          {/* CANVAS INFINITO */}
+          <div 
+            ref={containerRef}
+            className="flex-1 relative w-full h-full overflow-hidden bg-slate-950"
+            onClick={() => { setSelectedNode(null); setSelectedConn(null); }}
+          >
+            {/* LINHAS E CONEXÕES SVG */}
+            <svg className="absolute inset-0 w-full h-full pointer-events-none z-10">
+              {/* Conexão em tempo real sendo arrastada */}
+              {tempConnection && (() => {
+                const fn = nodes.find(n => n.id === tempConnection.fromId);
+                if (!fn) return null;
+                const p1 = getPortCoord(fn, tempConnection.fromPort);
+                const p2 = { x: tempConnection.currentX, y: tempConnection.currentY };
+                return (
+                  <path 
+                    d={`M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`} 
+                    fill="none" 
+                    stroke="#ec4899" 
+                    strokeWidth="2.5" 
+                    strokeDasharray="5 5" 
+                  />
+                );
+              })()}
+
+              {/* Conexões estabelecidas */}
+              {connections.map(conn => {
+                const fn = nodes.find(n => n.id === conn.from);
+                const tn = nodes.find(n => n.id === conn.to);
+                if (!fn || !tn) return null;
+
+                const p1 = getPortCoord(fn, conn.fromPort || 'right');
+                const p2 = getPortCoord(tn, conn.toPort || 'left');
+                const { path, midX, midY, angle } = computeBezier(p1, p2, conn.fromPort, conn.toPort);
+                const isSelected = selectedConn?.id === conn.id;
+
+                const rotation = (conn.labelMode || globalLabelMode) === 'follow' ? angle : 0;
+
+                return (
+                  <g key={conn.id} className="pointer-events-auto cursor-pointer" onClick={(e) => { e.stopPropagation(); setSelectedConn(conn); setSelectedNode(null); }}>
+                    <path 
+                      d={path} 
+                      fill="none" 
+                      stroke={isSelected ? '#ec4899' : '#6366f1'} 
+                      strokeWidth={isSelected ? '3.5' : '2'} 
+                      className="transition-colors"
+                    />
+                    {conn.label && (
+                      <g transform={`translate(${midX}, ${midY}) rotate(${rotation})`}>
+                        <rect 
+                          x="-45" y="-12" width="90" height="24" rx="6" 
+                          fill="#0f172a" 
+                          stroke={isSelected ? '#ec4899' : '#475569'} 
+                          strokeWidth="1.5" 
+                        />
+                        <text 
+                          textAnchor="middle" 
+                          dominantBaseline="central" 
+                          fill="#f8fafc" 
+                          fontSize="11" 
+                          fontWeight="600"
+                        >
+                          {conn.label}
+                        </text>
+                      </g>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+
+            {/* NÓS DO DIAGRAMA */}
+            {nodes.map(node => {
+              const { w, h } = getNodeDims(node);
+              const isSelected = selectedNode?.id === node.id;
+
+              return (
+                <div
+                  key={node.id}
+                  onPointerDown={(e) => handleNodePointerDown(e, node)}
+                  onTouchStart={(e) => handleNodePointerDown(e, node)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!hasDraggedSignificantly) {
+                      setSelectedNode(node);
+                      setSelectedConn(null);
+                    }
+                  }}
+                  style={{
+                    transform: `translate(${node.x}px, ${node.y}px)`,
+                    width: `${w}px`,
+                    minHeight: `${h}px`
+                  }}
+                  className={`absolute z-20 rounded-2xl select-none p-3.5 transition-shadow cursor-grab active:cursor-grabbing ${
+                    viewMode === 'borderless' 
+                      ? 'bg-slate-900/80 shadow-lg backdrop-blur' 
+                      : 'bg-slate-900/95 border border-slate-800 shadow-2xl backdrop-blur'
+                  } ${isSelected ? 'ring-2 ring-indigo-500 shadow-indigo-500/20' : ''}`}
+                >
+                  {/* PONTOS DE ANCORAGEM CARDEAIS (PORTAS DE CONEXÃO) */}
+                  <div 
+                    data-port="top" 
+                    data-node-id={node.id}
+                    onPointerDown={(e) => handlePortPointerDown(e, node.id, 'top')}
+                    onTouchStart={(e) => handlePortPointerDown(e, node.id, 'top')}
+                    className="absolute -top-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-indigo-500 hover:bg-pink-500 rounded-full border-2 border-slate-950 cursor-crosshair z-30 transition-transform hover:scale-125" 
+                    title="Ligar pelo Topo"
+                  />
+                  <div 
+                    data-port="bottom" 
+                    data-node-id={node.id}
+                    onPointerDown={(e) => handlePortPointerDown(e, node.id, 'bottom')}
+                    onTouchStart={(e) => handlePortPointerDown(e, node.id, 'bottom')}
+                    className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-indigo-500 hover:bg-pink-500 rounded-full border-2 border-slate-950 cursor-crosshair z-30 transition-transform hover:scale-125" 
+                    title="Ligar por Baixo"
+                  />
+                  <div 
+                    data-port="left" 
+                    data-node-id={node.id}
+                    onPointerDown={(e) => handlePortPointerDown(e, node.id, 'left')}
+                    onTouchStart={(e) => handlePortPointerDown(e, node.id, 'left')}
+                    className="absolute top-1/2 -left-2 -translate-y-1/2 w-4 h-4 bg-indigo-500 hover:bg-pink-500 rounded-full border-2 border-slate-950 cursor-crosshair z-30 transition-transform hover:scale-125" 
+                    title="Ligar pela Esquerda"
+                  />
+                  <div 
+                    data-port="right" 
+                    data-node-id={node.id}
+                    onPointerDown={(e) => handlePortPointerDown(e, node.id, 'right')}
+                    onTouchStart={(e) => handlePortPointerDown(e, node.id, 'right')}
+                    className="absolute top-1/2 -right-2 -translate-y-1/2 w-4 h-4 bg-indigo-500 hover:bg-pink-500 rounded-full border-2 border-slate-950 cursor-crosshair z-30 transition-transform hover:scale-125" 
+                    title="Ligar pela Direita"
+                  />
+
+                  {/* Barra de cor indicativa */}
+                  <div className="w-full h-1 rounded-full mb-2" style={{ backgroundColor: node.color }} />
+
+                  <div className="flex items-start justify-between gap-1">
+                    <h3 className="font-semibold text-xs text-white leading-snug truncate">{node.title}</h3>
+                    <button 
+                      onClick={(e) => deleteNode(node.id, e)}
+                      className="text-slate-500 hover:text-red-400 p-0.5"
+                      title="Excluir Nó"
+                    >
+                      <Icons.Trash />
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 mt-1 line-clamp-2 leading-relaxed">{node.desc}</p>
+
+                  {viewMode !== 'simple' && viewMode !== 'notag' && node.tags && (
+                    <div className="flex gap-1 mt-2 flex-wrap">
+                      {node.tags.map((t, idx) => (
+                        <span key={idx} className="text-[9px] bg-slate-800/80 text-indigo-300 px-1.5 py-0.5 rounded font-medium">
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* PAINEL INFERIOR: EDIÇÃO DO NÓ SELECIONADO */}
+          {selectedNode && (
+            <div className="absolute bottom-0 inset-x-0 bg-slate-900 border-t border-slate-800 p-3.5 z-40 rounded-t-2xl shadow-2xl flex flex-col gap-2 max-w-md mx-auto">
+              <div className="flex justify-between items-center">
+                <span className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">Editar Propriedades</span>
+                <button onClick={() => setSelectedNode(null)} className="text-xs text-slate-400 hover:text-white px-2 py-0.5">Fechar ✕</button>
+              </div>
+              <input
+                type="text"
+                value={selectedNode.title}
+                onChange={(e) => {
+                  const updated = { ...selectedNode, title: e.target.value };
+                  setSelectedNode(updated);
+                  setNodes(nodes.map(n => n.id === updated.id ? updated : n));
+                }}
+                className="bg-slate-800 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-2 outline-none focus:border-indigo-500"
+                placeholder="Título do nó"
+              />
+              <textarea
+                value={selectedNode.desc}
+                rows={2}
+                onChange={(e) => {
+                  const updated = { ...selectedNode, desc: e.target.value };
+                  setSelectedNode(updated);
+                  setNodes(nodes.map(n => n.id === updated.id ? updated : n));
+                }}
+                className="bg-slate-800 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-2 outline-none focus:border-indigo-500 resize-none"
+                placeholder="Descrição detalhada"
+              />
+            </div>
+          )}
+
+          {/* PAINEL INFERIOR: EDIÇÃO DA CONEXÃO SELECIONADA */}
+          {selectedConn && (
+            <div className="absolute bottom-0 inset-x-0 bg-slate-900 border-t border-slate-800 p-3.5 z-40 rounded-t-2xl shadow-2xl flex flex-col gap-2 max-w-md mx-auto">
+              <div className="flex justify-between items-center">
+                <span className="text-xs font-semibold text-pink-400 uppercase tracking-wider">Editar Rota da Linha</span>
+                <button onClick={() => setSelectedConn(null)} className="text-xs text-slate-400 hover:text-white px-2 py-0.5">Fechar ✕</button>
+              </div>
+
+              <input
+                type="text"
+                value={selectedConn.label || ''}
+                onChange={(e) => {
+                  const updated = { ...selectedConn, label: e.target.value };
+                  setSelectedConn(updated);
+                  setConnections(connections.map(c => c.id === updated.id ? updated : c));
+                }}
+                className="bg-slate-800 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-2 outline-none focus:border-pink-500"
+                placeholder="Texto do rótulo da linha"
+              />
+
+              <div className="flex gap-2 text-xs">
+                <div className="flex-1 flex flex-col gap-1">
+                  <span className="text-[10px] text-slate-400">Porta Origem:</span>
+                  <select 
+                    value={selectedConn.fromPort} 
+                    onChange={(e) => {
+                      const updated = { ...selectedConn, fromPort: e.target.value };
+                      setSelectedConn(updated);
+                      setConnections(connections.map(c => c.id === updated.id ? updated : c));
+                    }}
+                    className="bg-slate-800 border border-slate-700 text-white rounded p-1.5 outline-none"
+                  >
+                    <option value="top">Topo</option>
+                    <option value="right">Direita</option>
+                    <option value="bottom">Baixo</option>
+                    <option value="left">Esquerda</option>
+                  </select>
+                </div>
+
+                <div className="flex-1 flex flex-col gap-1">
+                  <span className="text-[10px] text-slate-400">Porta Destino:</span>
+                  <select 
+                    value={selectedConn.toPort} 
+                    onChange={(e) => {
+                      const updated = { ...selectedConn, toPort: e.target.value };
+                      setSelectedConn(updated);
+                      setConnections(connections.map(c => c.id === updated.id ? updated : c));
+                    }}
+                    className="bg-slate-800 border border-slate-700 text-white rounded p-1.5 outline-none"
+                  >
+                    <option value="top">Topo</option>
+                    <option value="right">Direita</option>
+                    <option value="bottom">Baixo</option>
+                    <option value="left">Esquerda</option>
+                  </select>
+                </div>
+
+                <div className="flex items-end">
+                  <button 
+                    onClick={() => {
+                      setConnections(connections.filter(c => c.id !== selectedConn.id));
+                      setSelectedConn(null);
+                    }}
+                    className="bg-red-950/80 border border-red-800 text-red-300 p-2 rounded hover:bg-red-900"
+                    title="Excluir Conexão"
+                  >
+                    <Icons.Trash />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
